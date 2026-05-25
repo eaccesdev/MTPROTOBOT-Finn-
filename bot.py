@@ -134,6 +134,43 @@ async def _broadcast(bot, cfg: dict, text: str, reply_markup=None):
             logger.warning("broadcast to %s failed: %s", uid, exc)
 
 
+# ---------------------------------------------------------------------------
+# Notification card helpers
+# ---------------------------------------------------------------------------
+
+_DIV = "─" * 32
+
+
+def _card(icon: str, title: str, body: str, footer: str = "") -> str:
+    """Render a clean bordered notification card."""
+    parts = [_DIV, f"{icon}  <b>{title}</b>", "", body]
+    if footer:
+        parts += ["", footer]
+    parts.append(_DIV)
+    return "\n".join(parts)
+
+
+def _proxy_summary(p: dict) -> str:
+    """Compact multi-line proxy description for use inside a card."""
+    flag    = pm.country_flag(p.get("country_code")) or ""
+    country = p.get("country_name") or ""
+    geo     = f"{flag} {country}".strip() or "Unknown"
+    lat     = p.get("latency_ms")
+    lat_s   = f"⚡ {lat:.0f} ms" if lat is not None else ""
+    chk     = p.get("check_count", 0)
+    suc     = p.get("success_count", 0)
+    up_s    = f"📊 {100*suc//chk}% uptime" if chk > 0 else ""
+    stats   = "  ·  ".join(s for s in [lat_s, up_s] if s)
+    ptype   = p["type"].upper()
+    lines = [
+        f"  🌐 <code>{p['server']} : {p['port']}</code>",
+        f"  📡 {ptype}  ·  {geo}",
+    ]
+    if stats:
+        lines.append(f"  {stats}")
+    return "\n".join(lines)
+
+
 def _fmt_proxy_detail(p: dict) -> str:
     """Multi-line detail block for a single proxy."""
     link      = pm.proxy_to_tg_link(p)
@@ -162,29 +199,21 @@ def _fmt_proxy_detail(p: dict) -> str:
 
 
 def _fmt_active(p: dict, state: dict) -> str:
-    """Format a connected-proxy info block."""
-    link      = pm.proxy_to_tg_link(p)
-    ptype     = p["type"].upper()
-    alive_ico = {True: "✅ Alive", False: "❌ Dead", None: "❓ Unchecked"}[p.get("alive")]
-    connected = state.get("connected_at", "—")
-    rotations = state.get("rotations", 0)
-    last_rot  = state.get("last_rotated") or "never"
+    """Format a connected-proxy card for /status."""
+    alive_ico  = {True: "🟢 Alive", False: "🔴 Dead", None: "⚪ Unchecked"}[p.get("alive")]
+    connected  = state.get("connected_at", "—")
+    rotations  = state.get("rotations", 0)
+    last_rot   = state.get("last_rotated") or "never"
+    monitoring = state.get("monitoring", False)
 
-    lat = p.get("latency_ms")
-    lat_str = f"{lat:.0f} ms" if lat is not None else "—"
-
-    flag    = pm.country_flag(p.get("country_code"))
-    country = f" {flag} {p.get('country_name')}" if flag else ""
-
-    return (
-        f"🔌 <b>Active Proxy [{ptype}]</b>{country}\n"
-        f"  Address   : <code>{p['server']}:{p['port']}</code>\n"
-        f"  Status    : {alive_ico}\n"
-        f"  Latency   : {lat_str}\n"
-        f"  Connected : {connected}\n"
-        f"  Rotations : {rotations}  (last: {last_rot})\n\n"
-        f"  <code>{link}</code>"
+    body = (
+        f"{_proxy_summary(p)}\n\n"
+        f"  Status     :  {alive_ico}\n"
+        f"  Connected  :  {connected}\n"
+        f"  Rotations  :  {rotations}  (last: {last_rot})\n"
+        f"  Monitor    :  {'🟢 ON' if monitoring else '🔴 OFF'}"
     )
+    return _card("🔌", "ACTIVE PROXY", body)
 
 
 def _daemon_running() -> tuple[bool, int | None]:
@@ -337,18 +366,12 @@ async def cmd_connect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
 
     conn.set_active(target)
-    link  = pm.proxy_to_tg_link(target)
-    ptype = target["type"].upper()
-
-    lat = target.get("latency_ms")
-    lat_str = f"  ({lat:.0f} ms)" if lat is not None else ""
-
-    text = (
-        f"🔌 <b>Connected [{ptype}]</b>{lat_str}\n\n"
-        f"<code>{link}</code>\n\n"
-        f"🔁 Auto-monitor is <b>ON</b> — I'll check this proxy every "
-        f"{cfg.get('monitor_interval_minutes', 2)} min and rotate automatically if it dies."
+    interval = cfg.get("monitor_interval_minutes", 2)
+    body = (
+        f"{_proxy_summary(target)}\n\n"
+        f"  🔁 Auto-monitor every {interval} min"
     )
+    text = _card("✅", "PROXY CONNECTED", body)
     deeplink = pm.proxy_to_tg_deeplink(target)
     keyboard = None
     if deeplink:
@@ -391,23 +414,19 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     dead_count  = sum(1 for p in proxies if p.get("alive") is False)
     unk_count   = sum(1 for p in proxies if p.get("alive") is None)
 
-    pool_line = (
-        f"\n📦 <b>Pool</b>: {len(proxies)} total "
-        f"(✅{alive_count} ❌{dead_count} ❓{unk_count})"
+    pool_body = (
+        f"  Total   :  {len(proxies)}\n"
+        f"  ✅ Alive  :  {alive_count}\n"
+        f"  ❌ Dead   :  {dead_count}\n"
+        f"  ❓ Unknown:  {unk_count}"
     )
 
     if not active:
-        await update.message.reply_text(
-            "⏹ <b>No active proxy</b> — monitoring is off.\n"
-            "Use /connect to start.\n"
-            + pool_line,
-            parse_mode=ParseMode.HTML,
-        )
+        text = _card("⏹", "NO ACTIVE PROXY", pool_body, "Use /connect to start.")
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
         return
 
-    text = _fmt_active(active, state) + "\n" + pool_line
-    monitoring = state.get("monitoring", False)
-    text += f"\n🔁 <b>Auto-monitor</b>: {'ON ✅' if monitoring else 'OFF ❌'}"
+    text = _fmt_active(active, state) + "\n\n" + _card("📦", "POOL", pool_body)
 
     deeplink = pm.proxy_to_tg_deeplink(active)
     keyboard = None
@@ -681,23 +700,29 @@ async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if removed:
             pm.save_proxies(proxies)
 
-    text = (
-        f"✅ Check complete!\n\n"
-        f"Total : {summary['total']}\n"
-        f"Alive : ✅ {summary['alive']}\n"
-        f"Dead  : ❌ {summary['dead']}\n"
-    )
+    extras = []
     if removed:
-        text += f"\n🗑 Auto-removed {removed} dead proxy(ies)."
+        extras.append(f"  🗑 Removed  :  {removed} dead")
+
+    body = (
+        f"  Checked   :  {summary['total']}\n"
+        f"  ✅ Alive   :  {summary['alive']}\n"
+        f"  ❌ Dead    :  {summary['dead']}\n"
+        f"  📦 Pool    :  {len(proxies)} remaining"
+        + ("\n\n" + "\n".join(extras) if extras else "")
+    )
+
+    active = conn.get_active()
+    footer = ""
+    if active and active.get("alive") is False:
+        footer = "⚠️ Active proxy is dead — auto-rotate will kick in shortly."
+
+    text = _card("🔍", "CHECK COMPLETE", body, footer)
 
     # Trigger background geo-enrichment for newly alive proxies
     asyncio.create_task(_enrich_and_save(proxies))
 
-    active = conn.get_active()
-    if active and active.get("alive") is False:
-        text += "\n\n⚠️ Your active proxy is now dead! Auto-rotate will kick in shortly."
-
-    await msg.edit_text(text)
+    await msg.edit_text(text, parse_mode=ParseMode.HTML)
 
 
 async def _enrich_and_save(proxies: list):
@@ -1218,23 +1243,33 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
     logger.info("monitor: active proxy %s:%s died — rotating",
                 active["server"], active["port"])
 
-    channels  = cfg.get("source_channels", [])
-    urls      = cfg.get("source_urls", [])
-    dead_link = pm.proxy_to_tg_link(active)
-
+    # Notify: proxy died card
     await _broadcast(
         context.bot, cfg,
-        f"⚠️ <b>Active proxy died!</b>\n"
-        f"<code>{dead_link}</code>\n\n"
-        f"🔄 Auto-rotating…"
+        _card("🔴", "PROXY FAILED", _proxy_summary(active), "🔄 Searching for replacement…")
     )
 
+    # Aggressively clean dead proxies before rotating
     if cfg.get("auto_remove_blocked", True):
         pm.remove_blocked(proxies)
         pm.save_proxies(proxies)
 
+    # Re-verify top candidates with a fresh check before picking the winner
+    channels  = cfg.get("source_channels", [])
+    urls      = cfg.get("source_urls", [])
+    candidates = [
+        p for p in pm.sort_by_score(proxies)
+        if p.get("alive") is True and pm.proxy_key(p) != pm.proxy_key(active)
+    ][:8]
+    if candidates:
+        await asyncio.gather(
+            *[checker.check_one(p, timeout=5) for p in candidates],
+            return_exceptions=True
+        )
+        pm.save_proxies(proxies)
+
     async def notify(msg):
-        await _broadcast(context.bot, cfg, msg)
+        pass  # suppress intermediate rotation messages — we send our own cards
 
     new_proxy = await conn.auto_rotate(
         proxies, channels, urls=urls,
@@ -1243,11 +1278,11 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
     )
 
     if new_proxy:
-        new_link = pm.proxy_to_tg_link(new_proxy)
-        ptype    = new_proxy["type"].upper()
         state    = conn.get_state()
-        lat = new_proxy.get("latency_ms")
-        lat_str = f"  ({lat:.0f} ms)" if lat is not None else ""
+        rot_body = (
+            f"{_proxy_summary(new_proxy)}\n\n"
+            f"  Rotation  :  #{state.get('rotations', 0)}"
+        )
         deeplink = pm.proxy_to_tg_deeplink(new_proxy)
         kb = None
         if deeplink:
@@ -1256,17 +1291,18 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
             ]])
         await _broadcast(
             context.bot, cfg,
-            f"✅ <b>Auto-rotated to new proxy [{ptype}]</b>{lat_str}\n\n"
-            f"<code>{new_link}</code>\n\n"
-            f"Total rotations: {state.get('rotations', 0)}",
+            _card("✅", "NEW PROXY ACTIVE", rot_body),
             reply_markup=kb,
         )
     else:
+        fail_body = (
+            "  All proxies are exhausted.\n"
+            "  Run /fetch to pull fresh ones,\n"
+            "  or /add to add proxies manually."
+        )
         await _broadcast(
             context.bot, cfg,
-            "🚨 <b>Auto-rotate failed!</b>\n\n"
-            "All proxies are dead and no new ones could be fetched.\n"
-            "Please add sources (/addchannel or /addsource) or proxies (/add) manually."
+            _card("🚨", "ROTATION FAILED", fail_body)
         )
 
 
@@ -1303,16 +1339,20 @@ async def _job_check(context: ContextTypes.DEFAULT_TYPE):
     logger.info("auto-check: %d total %d alive %d dead %d removed %d purged",
                 summary["total"], summary["alive"], summary["dead"], removed, stale)
 
-    text = (
-        f"🤖 <b>Auto-check complete</b>\n"
-        f"Alive: ✅{summary['alive']}  Dead: ❌{summary['dead']}"
-    )
+    extras = []
     if removed:
-        text += f"\n🗑 Removed {removed} dead proxy(ies)."
+        extras.append(f"  🗑 Removed  :  {removed} dead")
     if stale:
-        text += f"\n🕰 Purged {stale} stale proxy(ies)."
+        extras.append(f"  🕰 Purged   :  {stale} stale")
 
-    await _broadcast(context.bot, cfg, text)
+    body = (
+        f"  Checked   :  {summary['total']}\n"
+        f"  ✅ Alive   :  {summary['alive']}\n"
+        f"  ❌ Dead    :  {summary['dead']}\n"
+        f"  📦 Pool    :  {len(proxies)} remaining"
+        + ("\n\n" + "\n".join(extras) if extras else "")
+    )
+    await _broadcast(context.bot, cfg, _card("🤖", "BACKGROUND CHECK", body))
 
 
 # ---------------------------------------------------------------------------
@@ -1422,6 +1462,36 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Startup notification
+# ---------------------------------------------------------------------------
+
+async def _post_init(app: Application):
+    """Send an online card to all admins when the bot starts up."""
+    cfg     = pm.load_config()
+    proxies = pm.load_proxies()
+    alive   = sum(1 for p in proxies if p.get("alive") is True)
+    active  = conn.get_active()
+
+    active_line = ""
+    if active:
+        flag    = pm.country_flag(active.get("country_code")) or ""
+        country = active.get("country_name") or ""
+        geo     = f"{flag} {country}".strip()
+        geo_str = f"  ·  {geo}" if geo else ""
+        active_line = (
+            f"\n\n  🔌 Restored  :  <code>{active['server']} : {active['port']}</code>"
+            f"{geo_str}"
+        )
+
+    body = (
+        f"  📦 Pool     :  {len(proxies)} proxies  ({alive} alive)"
+        f"{active_line}\n\n"
+        f"  🔁 Monitor every {cfg.get('monitor_interval_minutes', 2)} min"
+    )
+    await _broadcast(app.bot, cfg, _card("🟢", "BOT ONLINE", body))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1435,7 +1505,7 @@ def main():
         )
         sys.exit(1)
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_post_init).build()
 
     # Command handlers
     app.add_handler(CommandHandler("start",         cmd_start))

@@ -109,9 +109,9 @@ async def check_one(proxy: dict, timeout: float = 8.0) -> bool:
         proxy["success_count"] = proxy["success_count"] + 1
         proxy["last_alive"]    = now
         proxy["latency_ms"]    = latency_ms
+        proxy["fail_streak"]   = 0          # reset consecutive-fail counter
     else:
-        # Keep previous latency on failure so the UI can still show it
-        pass
+        proxy["fail_streak"] = proxy.get("fail_streak", 0) + 1
 
     return alive
 

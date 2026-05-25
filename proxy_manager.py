@@ -296,9 +296,13 @@ def remove_proxy(proxies: list, identifier: str):
 
 
 def remove_blocked(proxies: list) -> int:
-    """Remove all proxies where alive == False. Returns count removed."""
+    """Remove proxies confirmed dead (alive=False) or with fail_streak >= 3.
+    Returns count removed."""
     before = len(proxies)
-    proxies[:] = [p for p in proxies if p.get("alive") is not False]
+    proxies[:] = [
+        p for p in proxies
+        if p.get("alive") is not False and p.get("fail_streak", 0) < 3
+    ]
     return before - len(proxies)
 
 
