@@ -1,0 +1,21 @@
+{
+  "bot_token": "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "admin_ids": [123456789],
+  "source_channels": [
+    "ProxyMTProto",
+    "MTProxies",
+    "ProxyFreeMTProto",
+    "TProxyRU",
+    "anti_1984",
+    "freesocks5proxies"
+  ],
+  "source_urls": [],
+  "check_interval_minutes": 30,
+  "auto_fetch_interval_minutes": 60,
+  "check_timeout_seconds": 8,
+  "max_proxies": 1000,
+  "auto_remove_blocked": true,
+  "monitor_interval_minutes": 2,
+  "stale_days": 7,
+  "daily_digest_hour": 9
+}

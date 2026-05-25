@@ -1,0 +1,7 @@
+{
+  "api_id":                  12345678,
+  "api_hash":                "0123456789abcdef0123456789abcdef",
+  "check_interval_seconds":  30,
+  "reconnect_delay_seconds": 5,
+  "max_rotate_attempts":     10
+}

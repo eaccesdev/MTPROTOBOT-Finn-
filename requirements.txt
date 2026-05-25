@@ -1,0 +1,9 @@
+# Core
+# Minimum Python: 3.10+ for bot, 3.11+ for daemon (asyncio.timeout)
+python-telegram-bot[job-queue]>=20.0,<22.0
+aiohttp>=3.8.0,<4.0.0          # channel + URL fetching, geo-lookup
+
+# Auto-proxy daemon (zero-tap MTProto switcher)
+telethon>=1.34.0
+python-socks[asyncio]>=2.0.0   # SOCKS5 support for Telethon
+PySocks>=1.7.1                  # fallback SOCKS5 if python-socks absent

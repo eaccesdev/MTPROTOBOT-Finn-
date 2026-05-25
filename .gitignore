@@ -1,0 +1,36 @@
+# === Sensitive / personal config ===
+config.json
+daemon_config.json
+
+# === Telethon session files ===
+*.session
+*.session-journal
+
+# === Runtime state ===
+proxies.json
+connection.json
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# === Virtual environment ===
+venv/
+env/
+.venv/
+
+# === Logs ===
+*.log
+nohup.out
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# === Old docs ===
+README.txt

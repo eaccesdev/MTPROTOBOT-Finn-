@@ -1,0 +1,38 @@
+[Unit]
+Description=Telegram Auto-Proxy Daemon (zero-tap MTProto switcher)
+Documentation=https://github.com/YOUR_USERNAME/TelegramProxyBot
+After=network-online.target telegram-proxy-bot.service
+Wants=network-online.target
+# Daemon is optional — does not require the bot
+PartOf=telegram-proxy-bot.service
+
+[Service]
+Type=simple
+User=null
+Group=null
+WorkingDirectory=/home/null/Desktop/TelegramProxyBot
+
+ExecStart=/bin/bash -c '\
+    if [ -f /home/null/Desktop/TelegramProxyBot/venv/bin/python ]; then \
+        exec /home/null/Desktop/TelegramProxyBot/venv/bin/python auto_proxy_daemon.py; \
+    else \
+        exec python3 auto_proxy_daemon.py; \
+    fi'
+
+Restart=on-failure
+RestartSec=15s
+StartLimitIntervalSec=180s
+StartLimitBurst=5
+
+# Give the daemon time to complete first-time login before systemd times out
+TimeoutStartSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-proxy-daemon
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

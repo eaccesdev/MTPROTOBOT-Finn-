@@ -1,0 +1,36 @@
+[Unit]
+Description=Telegram Proxy Manager Bot
+Documentation=https://github.com/YOUR_USERNAME/TelegramProxyBot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=null
+Group=null
+WorkingDirectory=/home/null/Desktop/TelegramProxyBot
+
+# Use venv python if present, fall back to system python3
+ExecStart=/bin/bash -c '\
+    if [ -f /home/null/Desktop/TelegramProxyBot/venv/bin/python ]; then \
+        exec /home/null/Desktop/TelegramProxyBot/venv/bin/python bot.py; \
+    else \
+        exec python3 bot.py; \
+    fi'
+
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=120s
+StartLimitBurst=5
+
+# Logging — view with: journalctl -u telegram-proxy-bot -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-proxy-bot
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
