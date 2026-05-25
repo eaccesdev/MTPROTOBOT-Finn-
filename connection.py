@@ -108,14 +108,41 @@ def pick_best(proxies: list) -> dict | None:
     Pick the best available proxy for connection.
 
     Priority:
-      1. Alive proxies (alive == True), sorted best-first by latency+uptime score
-      2. Unchecked proxies (alive == None)  — will be validated before use
-      3. Nothing → None
+      1. Alive proxies that are NOT in the 5-minute rotation cooldown window,
+         sorted best-first by latency+uptime score.
+      2. If all alive proxies are in cooldown, fall back to any alive proxy
+         (cooldown is advisory, not hard).
+      3. Unchecked proxies (alive == None)  — will be validated before use.
+      4. Nothing → None.
+
+    Rotation cooldown: a proxy gets `recently_failed_at` stamped when it is
+    removed as the active proxy due to failure.  Skipping it for 5 minutes
+    prevents the bot from immediately rotating back onto a flaky proxy.
     """
     import proxy_manager as pm
+    from datetime import datetime, timezone, timedelta
+
+    now      = datetime.now(timezone.utc)
+    cooldown = timedelta(minutes=5)
+
+    def _not_in_cooldown(p: dict) -> bool:
+        rfa = p.get("recently_failed_at")
+        if not rfa:
+            return True
+        try:
+            dt = datetime.fromisoformat(rfa)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (now - dt) > cooldown
+        except Exception:
+            return True
+
     alive = [p for p in proxies if p.get("alive") is True]
     if alive:
-        return pm.sort_by_score(alive)[0]
+        cooled = [p for p in alive if _not_in_cooldown(p)]
+        pool   = cooled if cooled else alive   # fallback: ignore cooldown if all expired
+        return pm.sort_by_score(pool)[0]
+
     unk = [p for p in proxies if p.get("alive") is None]
     return unk[0] if unk else None
 

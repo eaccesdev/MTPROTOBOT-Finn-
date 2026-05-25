@@ -46,6 +46,7 @@ Settings
 
 System
 /daemon              — Show daemon process status and active proxy
+/stats               — Pool statistics (latency, uptime, type breakdown)
 
 Compatibility: Python 3.8+, Windows 7+, Linux / Termux (Android)
 """
@@ -289,7 +290,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "  /setmonitor &lt;min&gt;  — active-proxy monitor interval\n"
         "  /reload             — hot-reload config without restart\n\n"
         "<b>System</b>\n"
-        "  /daemon  — show daemon process status"
+        "  /daemon  — show daemon process status\n"
+        "  /stats   — pool statistics (latency, uptime, type breakdown)"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -736,6 +738,49 @@ async def _enrich_and_save(proxies: list):
         logger.debug("geo enrichment error: %s", exc)
 
 
+async def _background_emergency_fetch(bot, cfg: dict, proxies: list):
+    """
+    Emergency fetch triggered when the alive pool drops below the configured
+    threshold.  Fetches, checks new proxies, and notifies admins of the result.
+    """
+    channels = cfg.get("source_channels", [])
+    urls     = cfg.get("source_urls", [])
+    if not channels and not urls:
+        return
+
+    try:
+        found   = await fetcher.fetch_all(channels, urls)
+        max_p   = cfg.get("max_proxies", 1000)
+        added   = 0
+        for p in found:
+            if len(proxies) >= max_p:
+                break
+            if pm.add_proxy(proxies, p):
+                added += 1
+
+        if added:
+            pm.save_proxies(proxies)
+            timeout  = cfg.get("check_timeout_seconds", 8)
+            new_ones = [p for p in proxies if p.get("alive") is None]
+            if new_ones:
+                summary = await checker.check_all(new_ones, timeout=timeout)
+                pm.save_proxies(proxies)
+                new_alive = summary["alive"]
+            else:
+                new_alive = 0
+
+            threshold = cfg.get("low_pool_threshold", 15)
+            body = (
+                f"  Fetched    :  {len(found)} found, {added} new\n"
+                f"  ✅ Checked  :  {new_alive} alive\n"
+                f"  Trigger    :  alive pool was below {threshold}"
+            )
+            await _broadcast(bot, cfg, _card("⚠️", "LOW POOL — AUTO-FETCH", body))
+            logger.info("emergency fetch: added %d, %d now alive", added, new_alive)
+    except Exception as exc:
+        logger.warning("emergency fetch error: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # /clean  /purge
 # ---------------------------------------------------------------------------
@@ -1172,6 +1217,67 @@ async def cmd_daemon(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# /stats
+# ---------------------------------------------------------------------------
+
+@require_admin
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show detailed pool statistics: type breakdown, latency, uptime."""
+    proxies = pm.load_proxies()
+    total   = len(proxies)
+    alive   = [p for p in proxies if p.get("alive") is True]
+    dead    = [p for p in proxies if p.get("alive") is False]
+    unk     = [p for p in proxies if p.get("alive") is None]
+
+    # Type breakdown across entire pool
+    types: dict[str, int] = {}
+    for p in proxies:
+        t = p.get("type", "unknown")
+        types[t] = types.get(t, 0) + 1
+
+    # Latency stats (alive proxies only)
+    lats = [p["latency_ms"] for p in alive if p.get("latency_ms") is not None]
+    if lats:
+        avg_lat = sum(lats) / len(lats)
+        min_lat = min(lats)
+        max_lat = max(lats)
+        lat_str = f"{avg_lat:.0f} ms avg  ({min_lat:.0f}–{max_lat:.0f} ms range)"
+    else:
+        lat_str = "N/A"
+
+    # Average uptime across checked proxies
+    uptimes = []
+    for p in proxies:
+        chk = p.get("check_count", 0)
+        suc = p.get("success_count", 0)
+        if chk > 0:
+            uptimes.append(suc / chk)
+    avg_uptime = (sum(uptimes) / len(uptimes) * 100) if uptimes else 0.0
+
+    # Rotation stats
+    state     = conn.get_state()
+    rotations = state.get("rotations", 0)
+    last_rot  = state.get("last_rotated") or "never"
+
+    # Type rows
+    type_lines = "\n".join(
+        f"    {t.upper():<10}  {c}" for t, c in sorted(types.items())
+    )
+
+    body = (
+        f"  Total      :  {total}\n"
+        f"  ✅ Alive    :  {len(alive)}\n"
+        f"  ❌ Dead     :  {len(dead)}\n"
+        f"  ❓ Unchecked:  {len(unk)}\n\n"
+        f"  Latency    :  {lat_str}\n"
+        f"  Avg Uptime :  {avg_uptime:.1f}%\n"
+        f"  Rotations  :  {rotations}  (last: {last_rot})\n\n"
+        f"  Types:\n{type_lines}"
+    )
+    await reply(update, _card("📊", "POOL STATISTICS", body))
+
+
+# ---------------------------------------------------------------------------
 # Scheduled jobs
 # ---------------------------------------------------------------------------
 
@@ -1238,6 +1344,28 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
 
     if alive:
         logger.debug("monitor: active proxy %s:%s is alive", active["server"], active["port"])
+
+        # Latency spike detection: warn if current reading is 3× the rolling
+        # median and above 500 ms — an early sign of degradation.
+        history = active.get("latency_history", [])
+        current_lat = active.get("latency_ms")
+        if history and current_lat is not None and len(history) >= 3:
+            sorted_h = sorted(history[:-1])   # exclude the just-recorded value
+            mid      = len(sorted_h) // 2
+            if len(sorted_h) % 2 == 0:
+                baseline = (sorted_h[mid - 1] + sorted_h[mid]) / 2.0
+            else:
+                baseline = float(sorted_h[mid])
+            if baseline > 0 and current_lat > baseline * 3 and current_lat > 500:
+                body = (
+                    f"{_proxy_summary(active)}\n\n"
+                    f"  Current  :  {current_lat:.0f} ms\n"
+                    f"  Baseline :  {baseline:.0f} ms  (3× threshold)"
+                )
+                await _broadcast(
+                    context.bot, cfg,
+                    _card("⚠️", "LATENCY SPIKE", body, "Proxy may degrade soon.")
+                )
         return
 
     logger.info("monitor: active proxy %s:%s died — rotating",
@@ -1248,6 +1376,13 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
         context.bot, cfg,
         _card("🔴", "PROXY FAILED", _proxy_summary(active), "🔄 Searching for replacement…")
     )
+
+    # Stamp recently_failed_at so pick_best skips this proxy for 5 minutes
+    dead_key = pm.proxy_key(active)
+    for p in proxies:
+        if pm.proxy_key(p) == dead_key:
+            p["recently_failed_at"] = datetime.now(timezone.utc).isoformat()
+            break
 
     # Aggressively clean dead proxies before rotating
     if cfg.get("auto_remove_blocked", True):
@@ -1336,6 +1471,14 @@ async def _job_check(context: ContextTypes.DEFAULT_TYPE):
     # Background geo-enrichment
     asyncio.create_task(_enrich_and_save(proxies))
 
+    # Low pool alarm: if alive proxies drop below threshold, emergency-fetch
+    alive_now = sum(1 for p in proxies if p.get("alive") is True)
+    threshold = cfg.get("low_pool_threshold", 15)
+    if alive_now < threshold:
+        logger.info("auto-check: alive pool (%d) below threshold (%d) — emergency fetch",
+                    alive_now, threshold)
+        asyncio.create_task(_background_emergency_fetch(context.bot, cfg, proxies))
+
     logger.info("auto-check: %d total %d alive %d dead %d removed %d purged",
                 summary["total"], summary["alive"], summary["dead"], removed, stale)
 
@@ -1382,10 +1525,23 @@ async def _job_fetch(context: ContextTypes.DEFAULT_TYPE):
 
     logger.info("auto-fetch: found %d added %d", len(found), added)
     if added:
-        await _broadcast(
-            context.bot, cfg,
-            f"📥 <b>Auto-fetch</b>: +{added} new proxy(ies) added. Total: {len(proxies)}"
+        # Immediately check the new unchecked proxies so they're ready to use
+        timeout  = cfg.get("check_timeout_seconds", 8)
+        new_ones = [p for p in proxies if p.get("alive") is None]
+        new_alive = 0
+        if new_ones:
+            summary = await checker.check_all(new_ones, timeout=timeout)
+            pm.save_proxies(proxies)
+            new_alive = summary["alive"]
+
+        body = (
+            f"  Sources    :  {len(channels)} ch  +  {len(urls)} URLs\n"
+            f"  Found      :  {len(found)}\n"
+            f"  New added  :  {added}\n"
+            f"  ✅ Alive    :  {new_alive}  (checked immediately)\n"
+            f"  📦 Total   :  {len(proxies)}"
         )
+        await _broadcast(context.bot, cfg, _card("📥", "AUTO-FETCH COMPLETE", body))
 
 
 # ---------------------------------------------------------------------------
@@ -1535,6 +1691,7 @@ def main():
     app.add_handler(CommandHandler("setmonitor",    cmd_setmonitor))
     app.add_handler(CommandHandler("reload",        cmd_reload))
     app.add_handler(CommandHandler("daemon",        cmd_daemon))
+    app.add_handler(CommandHandler("stats",         cmd_stats))
 
     # Inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(cb_list_page, pattern=r"^list_page:"))

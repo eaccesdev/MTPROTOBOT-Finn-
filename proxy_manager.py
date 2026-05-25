@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "max_proxies": 1000,
     "auto_remove_blocked": True,
     "stale_days": 7,                      # purge proxies dead this many days
+    "low_pool_threshold": 15,             # trigger emergency fetch below this many alive proxies
 }
 
 
@@ -69,14 +70,26 @@ def compute_score(p: dict) -> float:
     Weighted cost combining latency and reliability.
 
     Score formula:
-      base  = latency_ms   (or 9999 ms penalty if unknown)
+      base  = median of latency_history (or last latency_ms, or 9999 penalty)
       bonus = (1 - uptime) * 2000   (penalises flaky proxies)
       total = base + bonus
 
-    A verified, fast, reliable proxy scores lowest and sorts first.
+    Using the median of recent readings instead of a single sample makes the
+    score robust against one-off latency spikes or dips.  A verified, fast,
+    reliable proxy scores lowest and sorts first.
     """
-    lat = p.get("latency_ms")
-    base = float(lat) if lat is not None else 9999.0
+    history = p.get("latency_history", [])
+    if history:
+        # Median of the rolling history window — stable, outlier-resistant
+        sorted_h = sorted(history)
+        mid = len(sorted_h) // 2
+        if len(sorted_h) % 2 == 0:
+            base = (sorted_h[mid - 1] + sorted_h[mid]) / 2.0
+        else:
+            base = float(sorted_h[mid])
+    else:
+        lat = p.get("latency_ms")
+        base = float(lat) if lat is not None else 9999.0
 
     checks  = p.get("check_count", 0)
     success = p.get("success_count", 0)
@@ -217,22 +230,24 @@ def parse_proxy(text: str):
 def _make_proxy(server, port, ptype, secret=None, username=None, password=None):
     now = _now_iso()
     return {
-        "server":        server,
-        "port":          port,
-        "secret":        secret,
-        "username":      username,
-        "password":      password,
-        "type":          ptype,
-        "added_at":      now,
-        "first_seen":    now,
-        "last_checked":  None,
-        "last_alive":    None,
-        "alive":         None,
-        "latency_ms":    None,
-        "check_count":   0,
-        "success_count": 0,
-        "country_code":  None,
-        "country_name":  None,
+        "server":            server,
+        "port":              port,
+        "secret":            secret,
+        "username":          username,
+        "password":          password,
+        "type":              ptype,
+        "added_at":          now,
+        "first_seen":        now,
+        "last_checked":      None,
+        "last_alive":        None,
+        "alive":             None,
+        "latency_ms":        None,
+        "latency_history":   [],    # rolling window of last 5 latency readings
+        "check_count":       0,
+        "success_count":     0,
+        "country_code":      None,
+        "country_name":      None,
+        "recently_failed_at": None, # ISO ts of last rotation cooldown mark
     }
 
 
@@ -255,13 +270,15 @@ def add_proxy(proxies: list, proxy_dict: dict) -> bool:
         if proxy_key(existing) == key:
             return False
     # Back-fill new fields on import from old pool files
-    proxy_dict.setdefault("first_seen",    proxy_dict.get("added_at", _now_iso()))
-    proxy_dict.setdefault("last_alive",    None)
-    proxy_dict.setdefault("latency_ms",    None)
-    proxy_dict.setdefault("check_count",   0)
-    proxy_dict.setdefault("success_count", 0)
-    proxy_dict.setdefault("country_code",  None)
-    proxy_dict.setdefault("country_name",  None)
+    proxy_dict.setdefault("first_seen",         proxy_dict.get("added_at", _now_iso()))
+    proxy_dict.setdefault("last_alive",         None)
+    proxy_dict.setdefault("latency_ms",         None)
+    proxy_dict.setdefault("latency_history",    [])
+    proxy_dict.setdefault("check_count",        0)
+    proxy_dict.setdefault("success_count",      0)
+    proxy_dict.setdefault("country_code",       None)
+    proxy_dict.setdefault("country_name",       None)
+    proxy_dict.setdefault("recently_failed_at", None)
     proxies.append(proxy_dict)
     return True
 
@@ -358,13 +375,15 @@ def get_unchecked(proxies: list) -> list:
 def backfill_fields(proxies: list):
     """Ensure every proxy in the list has all current fields (migration helper)."""
     for p in proxies:
-        p.setdefault("first_seen",    p.get("added_at", _now_iso()))
-        p.setdefault("last_alive",    None)
-        p.setdefault("latency_ms",    None)
-        p.setdefault("check_count",   0)
-        p.setdefault("success_count", 0)
-        p.setdefault("country_code",  None)
-        p.setdefault("country_name",  None)
+        p.setdefault("first_seen",         p.get("added_at", _now_iso()))
+        p.setdefault("last_alive",         None)
+        p.setdefault("latency_ms",         None)
+        p.setdefault("latency_history",    [])
+        p.setdefault("check_count",        0)
+        p.setdefault("success_count",      0)
+        p.setdefault("country_code",       None)
+        p.setdefault("country_name",       None)
+        p.setdefault("recently_failed_at", None)
 
 
 # ---------------------------------------------------------------------------
