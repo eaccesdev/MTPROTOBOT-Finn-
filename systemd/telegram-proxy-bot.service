@@ -1,16 +1,15 @@
 [Unit]
 Description=Telegram Proxy Manager Bot
-Documentation=https://github.com/YOUR_USERNAME/TelegramProxyBot
+Documentation=https://github.com/eaccesdev/MTPROTOBOT-Finn-
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120s
+StartLimitBurst=5
 
 [Service]
 Type=simple
-User=null
-Group=null
 WorkingDirectory=/home/null/Desktop/TelegramProxyBot
 
-# Use venv python if present, fall back to system python3
 ExecStart=/bin/bash -c '\
     if [ -f /home/null/Desktop/TelegramProxyBot/venv/bin/python ]; then \
         exec /home/null/Desktop/TelegramProxyBot/venv/bin/python bot.py; \
@@ -20,17 +19,13 @@ ExecStart=/bin/bash -c '\
 
 Restart=on-failure
 RestartSec=10s
-StartLimitIntervalSec=120s
-StartLimitBurst=5
 
-# Logging — view with: journalctl -u telegram-proxy-bot -f
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=telegram-proxy-bot
 
-# Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

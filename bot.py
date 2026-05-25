@@ -302,24 +302,39 @@ async def cmd_connect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Verify unchecked proxy first
+    # Always do a live TCP check before connecting — cached alive status may be stale
     timeout = cfg.get("check_timeout_seconds", 8)
-    if target.get("alive") is None:
-        msg = await update.message.reply_text("🔍 Verifying proxy before connecting…")
-        alive = await checker.check_one(target, timeout=timeout)
-        pm.save_proxies(proxies)
-        if not alive:
-            await msg.edit_text("❌ That proxy is not reachable. Trying next best one…")
-            candidates = [p for p in proxies
-                          if p.get("alive") is True and p is not target]
-            if not candidates:
-                await msg.edit_text(
-                    "❌ No live proxies found. Run /fetch then /check first."
-                )
-                return
-            target = pm.sort_by_score(candidates)[0]
-        else:
-            await msg.delete()
+    msg = await update.message.reply_text(
+        f"🔍 Verifying {target['server']}:{target['port']} before connecting…"
+    )
+    alive = await checker.check_one(target, timeout=timeout)
+    pm.save_proxies(proxies)
+
+    if not alive:
+        # Try up to 5 next-best alive proxies before giving up
+        tried = {pm.proxy_key(target)}
+        found = False
+        candidates = [p for p in pm.sort_by_score(proxies)
+                      if p.get("alive") is not False and pm.proxy_key(p) not in tried]
+        for candidate in candidates[:5]:
+            await msg.edit_text(
+                f"❌ Dead. Trying {candidate['server']}:{candidate['port']}…"
+            )
+            alive = await checker.check_one(candidate, timeout=timeout)
+            pm.save_proxies(proxies)
+            tried.add(pm.proxy_key(candidate))
+            if alive:
+                target = candidate
+                found = True
+                break
+        if not found:
+            await msg.edit_text(
+                "❌ All tried proxies are unreachable.\n"
+                "Run /fetch then /check to refresh the pool."
+            )
+            return
+
+    await msg.delete()
 
     conn.set_active(target)
     link  = pm.proxy_to_tg_link(target)
