@@ -98,6 +98,11 @@ logger = logging.getLogger(__name__)
 # Proxies per page in /list
 _LIST_PAGE_SIZE = 10
 
+# Consecutive monitor-check failures for the currently active proxy.
+# Resets to 0 on any successful check or after a rotation.
+# Rotation is only triggered once this reaches min_failures_to_rotate.
+_active_fail_count: int = 0
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -367,8 +372,11 @@ async def cmd_connect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await msg.delete()
 
+    global _active_fail_count
+    _active_fail_count = 0          # fresh proxy — reset consecutive failure counter
+
     conn.set_active(target)
-    interval = cfg.get("monitor_interval_minutes", 2)
+    interval = cfg.get("monitor_interval_minutes", 5)
     body = (
         f"{_proxy_summary(target)}\n\n"
         f"  🔁 Auto-monitor every {interval} min"
@@ -1098,6 +1106,8 @@ async def cmd_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Check timeout         : {cfg.get('check_timeout_seconds', 8)} s\n"
         f"Max proxies           : {cfg.get('max_proxies', 1000)}\n"
         f"Stale purge threshold : {cfg.get('stale_days', 7)} days\n"
+        f"Failures to rotate    : {cfg.get('min_failures_to_rotate', 2)} consecutive\n"
+        f"Low pool threshold    : {cfg.get('low_pool_threshold', 15)} alive proxies\n"
         f"Auto-remove dead      : {cfg.get('auto_remove_blocked', True)}\n"
         f"Admin IDs             : {cfg.get('admin_ids') or 'all users'}\n"
         f"Source channels       : {len(cfg.get('source_channels', []))}\n"
@@ -1328,6 +1338,8 @@ def _reschedule_digest(app, hour_utc: int):
 # ---------------------------------------------------------------------------
 
 async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
+    global _active_fail_count
+
     if not conn.is_monitoring():
         return
 
@@ -1343,6 +1355,10 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
     pm.save_proxies(proxies)
 
     if alive:
+        if _active_fail_count > 0:
+            logger.info("monitor: proxy %s:%s recovered after %d failure(s)",
+                        active["server"], active["port"], _active_fail_count)
+        _active_fail_count = 0
         logger.debug("monitor: active proxy %s:%s is alive", active["server"], active["port"])
 
         # Latency spike detection: warn if current reading is 3× the rolling
@@ -1368,8 +1384,32 @@ async def _job_monitor_active(context: ContextTypes.DEFAULT_TYPE):
                 )
         return
 
-    logger.info("monitor: active proxy %s:%s died — rotating",
-                active["server"], active["port"])
+    # --- Proxy check failed ---
+    _active_fail_count += 1
+    threshold = cfg.get("min_failures_to_rotate", 2)
+
+    logger.info("monitor: active proxy %s:%s failed (%d/%d before rotate)",
+                active["server"], active["port"], _active_fail_count, threshold)
+
+    if _active_fail_count < threshold:
+        # Not yet at the rotation threshold — warn but stay on this proxy.
+        # A brief network blip or transient congestion should self-resolve.
+        monitor_min = cfg.get("monitor_interval_minutes", 5)
+        body = (
+            f"{_proxy_summary(active)}\n\n"
+            f"  Failures  :  {_active_fail_count} / {threshold}\n"
+            f"  Next check:  ~{monitor_min} min  (will rotate if still down)"
+        )
+        await _broadcast(
+            context.bot, cfg,
+            _card("🟡", "PROXY CHECK FAILED", body,
+                  "Monitoring continues — not rotating yet.")
+        )
+        return
+
+    # Threshold reached — proceed with rotation
+    _active_fail_count = 0
+    logger.info("monitor: %d consecutive failures — rotating now", threshold)
 
     # Notify: proxy died card
     await _broadcast(

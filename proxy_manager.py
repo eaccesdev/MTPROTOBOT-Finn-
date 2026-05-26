@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     "auto_remove_blocked": True,
     "stale_days": 7,                      # purge proxies dead this many days
     "low_pool_threshold": 15,             # trigger emergency fetch below this many alive proxies
+    "min_failures_to_rotate": 2,          # consecutive monitor failures before actually rotating
 }
 
 
