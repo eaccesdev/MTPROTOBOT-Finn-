@@ -1,6 +1,7 @@
 {
   "bot_token": "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "admin_ids": [123456789],
+
   "source_channels": [
     "ProxyMTProto",
     "MTProxies",
@@ -10,12 +11,30 @@
     "freesocks5proxies"
   ],
   "source_urls": [],
+
   "check_interval_minutes": 30,
   "auto_fetch_interval_minutes": 60,
+  "monitor_interval_minutes": 2,
+  "daily_digest_hour": 9,
+
   "check_timeout_seconds": 8,
   "max_proxies": 1000,
   "auto_remove_blocked": true,
-  "monitor_interval_minutes": 2,
   "stale_days": 7,
-  "daily_digest_hour": 9
+  "low_pool_threshold": 15,
+  "min_failures_to_rotate": 2,
+
+  "auto_clean_enabled": false,
+  "auto_clean_interval_hours": 24,
+  "auto_purge_enabled": false,
+  "auto_purge_interval_hours": 24,
+
+  "notification_cooldown_minutes": 5,
+  "notify_mode": "normal",
+
+  "web_dashboard_enabled": false,
+  "web_dashboard_port": 8080,
+
+  "log_level": "INFO",
+  "log_file": ""
 }

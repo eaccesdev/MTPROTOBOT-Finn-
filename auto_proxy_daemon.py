@@ -94,9 +94,13 @@ def _apply_to_telegram_desktop(proxy: dict) -> None:
       1. Build a tg://proxy?... deep-link and open it with xdg-open.
          Telegram Desktop intercepts the protocol and shows its
          "Use this proxy?" confirmation dialog.
-      2. If xdotool is installed, wait 2.5 s for the dialog to render,
-         then activate the Telegram window and press Return to confirm
-         (the primary button in the proxy dialog is pre-focused).
+      2. Auto-confirm the dialog:
+         - On X11: uses xdotool (if installed) to activate the Telegram window
+           and press Return (the primary button is pre-focused).
+         - On Wayland (#21): uses ydotool (if installed) as a drop-in
+           replacement — it works via the kernel's uinput interface and does
+           not require an X11 display.
+         - If neither tool is available, the dialog is opened but not confirmed.
 
     Runs in a daemon thread so it never blocks the asyncio event loop.
     Silently does nothing if xdg-open is not available (e.g. headless server).
@@ -111,6 +115,14 @@ def _apply_to_telegram_desktop(proxy: dict) -> None:
         f"&secret={secret}"
     )
 
+    # Detect display server to choose the right automation tool (#21)
+    is_wayland = bool(os.environ.get("WAYLAND_DISPLAY"))
+    auto_tool  = None
+    if is_wayland and shutil.which("ydotool"):
+        auto_tool = "ydotool"
+    elif not is_wayland and shutil.which("xdotool"):
+        auto_tool = "xdotool"
+
     def _run() -> None:
         try:
             subprocess.Popen(
@@ -121,26 +133,34 @@ def _apply_to_telegram_desktop(proxy: dict) -> None:
         except Exception:
             return
 
-        if not shutil.which("xdotool"):
+        if not auto_tool:
             return
 
         # Give Telegram time to render the confirmation dialog.
         time.sleep(2.5)
         try:
-            # Bring the Telegram window to the front, then confirm the dialog.
-            # The "Use this proxy" button has keyboard focus when the dialog
-            # opens, so Return accepts it without moving the mouse.
-            subprocess.run(
-                [
-                    "xdotool",
-                    "search", "--sync", "--limit", "1", "--name", "Telegram",
-                    "windowactivate", "--sync",
-                    "key", "--clearmodifiers", "Return",
-                ],
-                timeout=10,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            if auto_tool == "xdotool":
+                # X11: activate Telegram window and press Return
+                subprocess.run(
+                    [
+                        "xdotool",
+                        "search", "--sync", "--limit", "1", "--name", "Telegram",
+                        "windowactivate", "--sync",
+                        "key", "--clearmodifiers", "Return",
+                    ],
+                    timeout=10,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            elif auto_tool == "ydotool":
+                # Wayland: send a Return key press via uinput (#21)
+                # ydotool key 28:1 28:0 — key code 28 = Return, :1=press :0=release
+                subprocess.run(
+                    ["ydotool", "key", "28:1", "28:0"],
+                    timeout=10,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         except Exception:
             pass
 
@@ -161,8 +181,8 @@ logger = logging.getLogger("auto_proxy_daemon")
 # Config
 # ---------------------------------------------------------------------------
 
-DAEMON_CONFIG_FILE = "daemon_config.json"
-SESSION_FILE       = "daemon_session"   # Telethon saves .session here
+DAEMON_CONFIG_FILE = os.path.join(pm.DATA_DIR, "daemon_config.json")   # #24 DATA_DIR
+SESSION_FILE       = os.path.join(pm.DATA_DIR, "daemon_session")
 
 _DEFAULT_DAEMON_CFG = {
     "api_id":                  0,
@@ -404,11 +424,23 @@ async def _find_working_proxy(api_id: int, api_hash: str,
 
     ordered = _sorted(mtproto) + _sorted(socks)
 
-    BATCH_SIZE   = 5     # keep event-loop load manageable
+    # #23 — Startup optimization: try all verified proxies in one large batch first,
+    # then fall back to scanning unverified proxies in smaller batches of 5.
+    verified_in_order = [p for p in ordered if p.get("mtproto_ok")]
+    unverified        = [p for p in ordered if not p.get("mtproto_ok")]
+
+    if verified_in_order:
+        # Probe all verified proxies at once — they should connect in ~6 s
+        batched_ordered = [verified_in_order] + [
+            unverified[i:i + 5] for i in range(0, len(unverified), 5)
+        ]
+    else:
+        batched_ordered = [ordered[i:i + 5] for i in range(0, len(ordered), 5)]
+
+    BATCH_SIZE   = 5     # used for unverified proxies only
     GRACE_WINDOW = 0.5   # seconds to wait after first success for faster rivals
 
-    for start in range(0, len(ordered), BATCH_SIZE):
-        batch = ordered[start:start + BATCH_SIZE]
+    for batch in batched_ordered:
 
         task_map: dict = {
             asyncio.create_task(_try_connect(api_id, api_hash, p, connect_timeout)): p
@@ -613,7 +645,7 @@ async def run_daemon():
                 await checker.check_all(
                     candidates[:100], timeout=timeout_chk, concurrency=100
                 )
-                pm.save_proxies(proxies)
+                pm.save_proxies(proxies)   # sync OK in daemon — atomic write protects integrity
                 alive = pm.get_alive(proxies)
 
                 if not alive:
